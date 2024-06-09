@@ -1,0 +1,1829 @@
+# SLU, GWAS Lepidium
+
+# Author: Felix Seifert, cropSeq bioinformatics
+
+shell.executable("/bin/bash")
+
+ADMIXTURE_RUN_NUMBER = 10
+
+SNP_DATA = 'data/raw/Lepidium_Genotypes_targeted_Bowtie2-Genome_Freebayes-ploidy2-min-count-8_NGS1763_2020-06-12_minus_1.xlsx'
+
+REFERENCE = 'data/genome/Lc92_nuclear_assembly_20210921.fasta',
+MARKER_SEQUENCES = 'data/marker/lepidium_marker_sequences.fasta',
+
+STRUCTURE_K = [2, 3, 4, 5, 6, 7, 8]
+
+wfbasedir = workflow.basedir
+
+rule all:
+    input:
+        expand(
+            'analysis/gwas/{adjusted_dataset}/{trait}/gwas.{covar_type}_{covar}.{result_file}',
+            adjusted_dataset=['adjusted', 'adjusted_filtered'],
+            trait=[
+                'erucic_acid_fraction', 'flowering_time', 'glucoallyssin_concentration',
+                'glucosinolate_concentration', 'oil_content', 'oleic_acid_fraction', 
+                'seed_weight', 'sinalbin_concentration'
+            ],
+            covar_type=['mds', 'pca'],
+            covar=range(2, 15),
+            result_file = ['log']
+        ),
+        expand(
+            'analysis/plots/gwas/{adjusted_dataset}/{trait}_{covar_type}_{covar}_{plot}.png',
+            adjusted_dataset=['adjusted', 'adjusted_filtered'],
+            trait=[
+                'erucic_acid_fraction', 'flowering_time', 'glucoallyssin_concentration',
+                'glucosinolate_concentration', 'oil_content', 'oleic_acid_fraction', 
+                'seed_weight', 'sinalbin_concentration'
+            ],
+            covar_type=['mds', 'pca'],
+            covar=range(2, 15),
+            plot = ["manhattan", "qq"]
+        ),
+        expand(
+            'analysis/gwas/{adjusted_dataset}/{trait}/{trait}_{covar_type}_{covar}.xlsx',
+            adjusted_dataset=['adjusted', 'adjusted_filtered'],
+            trait=[
+                'erucic_acid_fraction', 'flowering_time', 'glucoallyssin_concentration',
+                'glucosinolate_concentration', 'oil_content', 'oleic_acid_fraction', 
+                'seed_weight', 'sinalbin_concentration'
+            ],
+            covar_type=['mds', 'pca'],
+            covar=range(2, 15)
+        ),
+        expand(
+            'analysis/gwas/{adjusted_dataset}/summary.csv',
+            adjusted_dataset=['adjusted', 'adjusted_filtered']
+        ),
+        'analysis/population_structure/mds/genotype_maf_filtered_pruned.mds',
+        expand(
+            'analysis/population_structure/pca/genotype_maf_filtered_pruned.{file}',
+            file = ['eigenval', 'eigenvec']
+        ),
+        expand('analysis/plots/phenotype/{trait}.{adjusted_dataset}.png',
+            trait=[
+                'erucic_acid_fraction', 'flowering_time', 'glucoallyssin_concentration',
+                'glucosinolate_concentration', 'oil_content', 'oleic_acid_fraction', 
+                'seed_weight', 'sinalbin_concentration'
+            ],
+            adjusted_dataset=["adjusted", "adjusted_filtered"]
+        ),
+        expand('analysis/plots/{analysis}/genotype_maf_filtered_pruned_non_redundant_{analysis}_{file}.{file_type}', analysis=['mds', 'pca'], file=['2d_plot', '2d_plot_with_label', '3d_plot', 'matrix_plot', 'cumulative_explained_variance', 'scree_plot'], file_type=['png', 'svg']),
+        expand('analysis/population_structure/structure/clumpp/{dimension}/k{cluster_size}/clumpp_result_{dimension}_k{cluster_size}', dimension = ['ind' , 'pop'], clumpp_datatype = ["ind", 'pop'], cluster_size = STRUCTURE_K, run_index = range(1,11)),
+        expand('analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}_pophelper', cluster_size = STRUCTURE_K),
+        'analysis/plots/population_structure',
+        'analysis/genotype/genotype_maf_filtered_pruned_label.csv',
+
+        expand('analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}_pophelper_best_cluster', cluster_size = STRUCTURE_K),
+        expand('analysis/plots/{analysis}/k{cluster_size}/genotype_maf_filtered_pruned_non_redundant_{analysis}_k{cluster_size}_{file}.{file_type}', analysis = ['mds', 'pca'], cluster_size = STRUCTURE_K, file = ['2d_plot', '2d_plot_with_label', '3d_plot', 'matrix_plot', 'cumulative_explained_variance'], file_type = ['png', 'svg']),
+        expand('analysis/plots/{analysis}/k{cluster_size}/genotype_maf_filtered_pruned_non_redundant_{analysis}_k{cluster_size}_3d_animation.mp4', analysis = ['mds', 'pca'], cluster_size = STRUCTURE_K) ,
+
+        expand('analysis/genotype/missing_summary/genotype.{dataset}', dataset=['imiss', 'lmiss']),
+        'analysis/genotype/marker_allele_frequency_summary/genotype.frq',
+
+        expand('analysis/plots/heatmaps/genotype_alleles_{subset}.png', subset=['unfiltered', 'filtered', 'pruned', 'pruned_non_redundant']),
+
+
+## Subpart: genotype data reformatting and initial filtering
+##############################################################
+
+rule export_genotype_data_from_xlsx:
+    input:
+        SNP_DATA,
+    output:
+        temp('analysis/data/genotype/genotype_extract.tsv'),
+    benchmark:
+        'benchmark/export_genotype_data_from_xlsx.txt'
+    log:
+        'logs/export_genotype_data_from_xlsx.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/convert_xlsx_to_tsv.py \
+            --output {output} \
+            --sheet "Freebayes-ploidy2 variants" \
+            --xlsx "{input}" \
+            > {log} \
+            2>&1
+        """
+
+
+rule genotype_data_sample_title_trim:
+    input:
+        'analysis/data/genotype/genotype_extract.tsv',
+    output:
+        temp('analysis/data/genotype/genotype_extract_title_trim.tsv'),
+    benchmark:
+        'benchmark/export_genotype_data_from_xlsx.txt'
+    log:
+        'logs/export_genotype_data_from_xlsx.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        sed \
+            's/P[0-9]*-[A-H][0-9]*-TSK[0-9]*-//g' \
+            {input} \
+            > {output}
+            2> {log}
+        """
+
+
+rule genotype_data_remove_unnecessary_columns:
+    input:
+        'analysis/data/genotype/genotype_extract_title_trim.tsv',
+    output:
+        'analysis/data/genotype/genotype_subset.tsv',
+    benchmark:
+        'benchmark/genotype_data_remove_unnecessary_columns.txt'
+    log:
+        'logs/genotype_data_remove_unnecessary_columns.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/tsv_drop_columns.py \
+            --columns 295-585 \
+            --input {input} \
+            --output {output} \
+            > {log} \
+            2>&1
+        """
+
+
+rule genotype_data_transpose:
+    input:
+        'analysis/data/genotype/genotype_subset.tsv',
+    output:
+        temp('analysis/data/genotype/genotype_transpose.tsv')
+    benchmark:
+        'benchmark/genotype_data_transpose.txt'
+    log:
+        'logs/genotype_data_transpose.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/transpose_tsv.py \
+            --input {input} \
+            --output {output} \
+            > {log} \
+            2>&1
+        """
+
+
+rule genotype_truncate_genotype_identifier:
+    input:
+        dataset = 'analysis/data/genotype/genotype_transpose.tsv',
+        translation = 'data/sequencing_data/publication_sample_ids.tsv'
+    output:
+        'analysis/data/genotype/genotype_subset_publication_id.tsv',
+    benchmark:
+        'benchmark/genotype_truncate_genotype_identifier.txt'
+    log:
+        'logs/genotype_truncate_genotype_identifier.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/rename_sample_ids.py \
+            --input {input.dataset} \
+            --output {output} \
+            --translation {input.translation} \
+            > {log} \
+            2>&1
+        """        
+
+
+rule genotype_drop_samples:
+    input:
+        dataset = 'analysis/data/genotype/genotype_subset_publication_id.tsv',
+        remove_samples = 'data/filtered_genotypes.txt'
+    output:
+        'analysis/data/genotype/genotype_subset_publication_id_filtered.tsv',
+    benchmark:
+        'benchmark/genotype_drop_samples.txt'
+    log:
+        'logs/genotype_drop_samples.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/remove_sample_ids.py \
+            --input {input.dataset} \
+            --output {output} \
+            --samples {input.remove_samples} \
+            > {log} \
+            2>&1
+        """
+
+
+
+## Subpart: Phenotype adjusted mean (adjusted) calculation
+##################################################################
+
+rule rename_trait_sample_identifier:
+    input:
+        dataset = 'data/trait/{trait}_processed.csv',
+        translation = 'data/sequencing_data/publication_sample_ids.tsv'
+    output:
+        'analysis/phenotype/{trait}_processed_renamed.csv',
+    benchmark:
+        'benchmark/rename_trait_sample_identifier_{trait}.txt'
+    log:
+        'logs/rename_trait_sample_identifier_{trait}.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/rename_sample_ids.py \
+            --input {input.dataset} \
+            --output {output} \
+            --translation {input.translation} \
+            > {log} \
+            2>&1
+        """
+
+
+rule calculate_adjusted_phenotype:
+    input:
+        'analysis/phenotype/erucic_acid_processed_renamed.csv',
+        'analysis/phenotype/flowering_time_processed_renamed.csv',
+        'analysis/phenotype/glucoallyssin_processed_renamed.csv',
+        'analysis/phenotype/glucosinolate_processed_renamed.csv',
+        'analysis/phenotype/oil_content_processed_renamed.csv',
+        'analysis/phenotype/oleic_acid_processed_renamed.csv',
+        'analysis/phenotype/seed_weight_processed_renamed.csv',
+        'analysis/phenotype/sinalbin_processed_renamed.csv',
+    output:
+        'analysis/phenotype/adjusted/erucic_acid_fraction.adjusted.tsv',
+        'analysis/phenotype/adjusted/flowering_time.adjusted.tsv',
+        'analysis/phenotype/adjusted/glucoallyssin_concentration.adjusted.tsv',
+        'analysis/phenotype/adjusted/glucosinolate_concentration.adjusted.tsv',
+        'analysis/phenotype/adjusted/oil_content.adjusted.tsv',
+        'analysis/phenotype/adjusted/oleic_acid_fraction.adjusted.tsv',
+        'analysis/phenotype/adjusted/seed_weight.adjusted.tsv',
+        'analysis/phenotype/adjusted/sinalbin_concentration.adjusted.tsv',
+    conda:
+        'envs/r_lme4.yaml'
+    benchmark:
+        'benchmark/calculate_adjusted_phenotype.txt'
+    log:
+        'logs/calculate_adjusted_phenotype.log'        
+    threads: 1
+    shell:
+        """
+        R -f {wfbasedir}/src/adjusted_trait_calculation.R
+        """
+
+
+rule calculate_adjusted_phenotype_without_outlier:
+    input:
+        'analysis/phenotype/erucic_acid_processed_renamed.csv',
+        'analysis/phenotype/flowering_time_processed_renamed.csv',
+        'analysis/phenotype/glucoallyssin_processed_renamed.csv',
+        'analysis/phenotype/glucosinolate_processed_renamed.csv',
+        'analysis/phenotype/oil_content_processed_renamed.csv',
+        'analysis/phenotype/oleic_acid_processed_renamed.csv',
+        'analysis/phenotype/seed_weight_processed_renamed.csv',
+        'analysis/phenotype/sinalbin_processed_renamed.csv',
+    output:
+        'analysis/phenotype/adjusted/erucic_acid_fraction.adjusted_filtered.tsv',
+        'analysis/phenotype/adjusted/flowering_time.adjusted_filtered.tsv',
+        'analysis/phenotype/adjusted/glucoallyssin_concentration.adjusted_filtered.tsv',
+        'analysis/phenotype/adjusted/glucosinolate_concentration.adjusted_filtered.tsv',
+        'analysis/phenotype/adjusted/oil_content.adjusted_filtered.tsv',
+        'analysis/phenotype/adjusted/oleic_acid_fraction.adjusted_filtered.tsv',
+        'analysis/phenotype/adjusted/seed_weight.adjusted_filtered.tsv',
+        'analysis/phenotype/adjusted/sinalbin_concentration.adjusted_filtered.tsv',
+    conda:
+        'envs/r_lme4.yaml'
+    benchmark:
+        'benchmark/calculate_adjusted_phenotype_subset.txt'
+    log:
+        'logs/calculate_adjusted_phenotype_subset.log'        
+    threads: 1
+    shell:
+        """
+        R -f {wfbasedir}/src/adjusted_trait_calculation_subset.R > {log}
+        """
+
+
+rule generate_phenotype_distribution_plot:
+    input:
+        'analysis/phenotype/adjusted/{trait}.{adjusted_dataset}.tsv',
+    output:
+        'analysis/plots/phenotype/{trait}.{adjusted_dataset}.png',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/generate_phenotype_distribution_plot_{trait}_{adjusted_dataset}.txt'
+    log:
+        'logs/generate_phenotype_distribution_plot_{trait}_{adjusted_dataset}.log'        
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/trait_distribution_plot.py \
+            --input {input} \
+            --trait_label "{wildcards.trait}" \
+            --output {output} \
+            > {log}
+        """
+
+
+rule convert_adjusted_phenotype_to_plink_format:
+    input:
+        'analysis/phenotype/adjusted/{trait}.{adjusted_dataset}.tsv',
+    output:
+        'analysis/phenotype/adjusted/{trait}.{adjusted_dataset}.pheno',
+    benchmark:
+        'benchmark/convert_adjusted_phenotype_to_plink_format_{trait}_{adjusted_dataset}.txt'
+    log:
+        'logs/convert_adjusted_phenotype_to_plink_format_{trait}_{adjusted_dataset}.log'
+    threads: 1
+    shell:
+        """
+        echo \
+            "FID\tIID\t{wildcards.trait}" \
+            > {output}
+        awk \
+            '{{if (NR!=1) {{print 0"\\t"$2"\\t"$3}}}}' \
+            {input} \
+            >> {output}
+        """
+
+
+## Subpart: Recoding of marker sequence and subsequent filtering
+################################################################
+
+rule marker_to_genome_scaffolding:
+    input:
+        genome = REFERENCE,
+        marker_contigs = MARKER_SEQUENCES,
+    output:
+        agp = 'analysis/marker_anchoring/ragtag.scaffold.agp',
+        fasta = 'analysis/marker_anchoring/ragtag.scaffold.fasta',
+    benchmark:
+        'benchmark/marker_to_genome_scaffolding.txt'
+    log:
+        'logs/marker_to_genome_scaffolding.log'
+    conda:
+        'envs/ragtag.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 4
+    shell:
+        """
+        ragtag.py scaffold \
+            {input.genome} \
+            {input.marker_contigs} \
+            -o analysis/marker_anchoring/ \
+            -t {threads} \
+            --aligner minimap2 \
+            > {log} \
+            2>&1
+        """
+
+
+rule clean_agp_file:
+    input:
+        'analysis/marker_anchoring/ragtag.scaffold.agp',
+    output:
+        'analysis/marker_anchoring/scaffold.agp',
+    benchmark:
+        'benchmark/clean_agp_file.txt'
+    log:
+        'logs/clean_agp_file.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        cat {input} |
+            grep -v "^#" |
+                sed -e 's/_RagTag//' \
+            > {output} \
+            2> {log}
+        """
+
+
+rule genotype_data_assembly_recoding:
+    input:
+        genotype = 'analysis/data/genotype/genotype_subset_publication_id_filtered.tsv',
+        genome_path = 'analysis/marker_anchoring/scaffold.agp',
+    output:
+        'analysis/data/genotype/genotype_subset_recoded.tsv',
+    benchmark:
+        'benchmark/genotype_data_assembly_recoding.txt'
+    log:
+        'logs/genotype_data_assembly_recoding.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/genotype_reference_recoding.py \
+            --genotype {input.genotype} \
+            --agp {input.genome_path} \
+            --output {output} \
+            > {log} \
+            2>&1
+        """
+
+
+rule genotype_marker_filtering:
+    input:
+        'analysis/data/genotype/genotype_subset_recoded.tsv',
+    output:
+        'analysis/data/genotype/genotype_filtered.tsv',
+    benchmark:
+        'benchmark/genotype_marker_filtering.txt'
+    log:
+        'logs/genotype_marker_filtering.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/gwas_snp_filtering.py \
+            --genotype {input} \
+            --header_columns 5 \
+            --output {output} \
+            > {log} \
+            2>&1
+        """
+
+
+rule genotype_plink_text_input_conversion:
+    input:
+        'analysis/data/genotype/genotype_filtered.tsv',
+    output:
+        'analysis/data/genotype/plink/text/genotype.fam',
+        'analysis/data/genotype/plink/text/genotype.map',
+        'analysis/data/genotype/plink/text/genotype.ped',
+    benchmark:
+        'benchmark/genotype_plink_text_input_conversion.txt'
+    log:
+        'logs/genotype_plink_text_input_conversion.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 {wfbasedir}/src/snp_data_plink_conversion.py \
+            --genotype {input} \
+            --output analysis/data/genotype/plink/text/genotype \
+            > {log} \
+            2>&1
+        """
+
+
+rule genotype_plink_binary_conversion:
+    input:
+        'analysis/data/genotype/plink/text/genotype.fam',
+        'analysis/data/genotype/plink/text/genotype.map',
+        'analysis/data/genotype/plink/text/genotype.ped',
+    output:
+        'analysis/data/genotype/plink/binary/genotype.bed',
+        'analysis/data/genotype/plink/binary/genotype.bim',
+        'analysis/data/genotype/plink/binary/genotype.fam',
+        temp('analysis/data/genotype/plink/binary/genotype.log'),
+        temp('analysis/data/genotype/plink/binary/genotype.nosex'),
+    benchmark:
+        'benchmark/genotype_plink_binary_conversion.txt'
+    log:
+        'logs/genotype_plink_binary_conversion.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --file analysis/data/genotype/plink/text/genotype \
+            --allow-extra-chr \
+            --make-bed \
+            --out analysis/data/genotype/plink/binary/genotype \
+            > {log} \
+            2>&1
+        """
+
+
+# Plink genotype data filtering
+#################################
+
+rule plink_filter_genotype_missing_nonstringent:
+    input:
+        'analysis/data/genotype/plink/binary/genotype.bed',
+        'analysis/data/genotype/plink/binary/genotype.bim',
+        'analysis/data/genotype/plink/binary/genotype.fam',
+    output:
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.bed',
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.bim',
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.fam',
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.log',
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.nosex',
+    benchmark:
+        'benchmark/plink_filter_genotype_missing_nonstringent.txt'
+    log:
+        'logs/plink_filter_genotype_missing_nonstringent.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --bfile analysis/data/genotype/plink/binary/genotype \
+            --allow-extra-chr \
+            --mind 0.5 \
+            --make-bed \
+            --out analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_filter_marker_missing_nonstringent:
+    input:
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.bed',
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.bim',
+        'analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent.fam',
+    output:
+        'analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent.bed',
+        'analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent.bim',
+        'analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent.fam',
+    benchmark:
+        'benchmark/plink_filter_marker_missing_nonstringent.txt'
+    log:
+        'logs/plink_filter_marker_missing_nonstringent.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --bfile analysis/genotype/filter_nonstringent/plink_missing_genotype_nonstringent \
+            --allow-extra-chr \
+            --geno 0.2 \
+            --make-bed \
+            --out analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_filter_genotype_missing:
+    input:
+        'analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent.bed',
+        'analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent.bim',
+        'analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent.fam',
+    output:
+        'analysis/genotype/plink_missing_genotype.bed',
+        'analysis/genotype/plink_missing_genotype.bim',
+        'analysis/genotype/plink_missing_genotype.fam',
+        'analysis/genotype/plink_missing_genotype.log',
+        'analysis/genotype/plink_missing_genotype.nosex',
+    benchmark:
+        'benchmark/plink_filter_genotype_missing.txt'
+    log:
+        'logs/plink_filter_genotype_missing.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --bfile analysis/genotype/filter_nonstringent/plink_missing_marker_nonstringent \
+            --allow-extra-chr \
+            --geno 0.25 \
+            --make-bed \
+            --out analysis/genotype/plink_missing_genotype \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_filter_marker_missing:
+    input:
+        'analysis/genotype/plink_missing_genotype.bed',
+        'analysis/genotype/plink_missing_genotype.bim',
+        'analysis/genotype/plink_missing_genotype.fam',
+    output:
+        'analysis/genotype/genotype.bed',
+        'analysis/genotype/genotype.bim',
+        'analysis/genotype/genotype.fam',
+        'analysis/genotype/genotype.log',
+        'analysis/genotype/genotype.nosex',
+    benchmark:
+        'benchmark/plink_filter_marker_missing.txt'
+    log:
+        'logs/plink_filter_marker_missing.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/plink_missing_genotype \
+            --geno 0.1 \
+            --make-bed \
+            --out analysis/genotype/genotype \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_filter_minor_allele_frequency:
+    input:
+        'analysis/genotype/genotype.bed',
+        'analysis/genotype/genotype.bim',
+        'analysis/genotype/genotype.fam',
+    output:
+        'analysis/genotype/genotype_maf_filtered.bed',
+        'analysis/genotype/genotype_maf_filtered.bim',
+        'analysis/genotype/genotype_maf_filtered.fam',
+    benchmark:
+        'benchmark/plink_filter_minor_allele_frequency.txt'
+    log:
+        'logs/plink_filter_minor_allele_frequency.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype \
+            --maf 0.05 \
+            --make-bed \
+            --out analysis/genotype/genotype_maf_filtered \
+            > {log} \
+            2>&1
+        """
+
+
+# Subpart: Population structure analysis
+##########################################
+
+rule plink_prune_marker_set:
+    input:
+        'analysis/genotype/genotype_maf_filtered.bed',
+        'analysis/genotype/genotype_maf_filtered.bim',
+        'analysis/genotype/genotype_maf_filtered.fam',
+    output:
+        'analysis/genotype/genotype_maf_filtered.prune.in',
+        'analysis/genotype/genotype_maf_filtered.prune.out',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/plink_prune_marker_set.txt'
+    log:
+        'logs/plink_prune_marker_set.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype_maf_filtered \
+            --indep-pairwise 10 1 0.2 \
+            --out analysis/genotype/genotype_maf_filtered \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_extract_pruned_marker_set:
+    input:
+        'analysis/genotype/genotype_maf_filtered.bed',
+        'analysis/genotype/genotype_maf_filtered.bim',
+        'analysis/genotype/genotype_maf_filtered.fam',
+        'analysis/genotype/genotype_maf_filtered.prune.in',
+        'analysis/genotype/genotype_maf_filtered.prune.out',
+    output:
+        'analysis/genotype/genotype_maf_filtered_pruned.bed',
+        'analysis/genotype/genotype_maf_filtered_pruned.bim',
+        'analysis/genotype/genotype_maf_filtered_pruned.fam',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/convert_binary_plink_to_text.txt'
+    log:
+        'logs/convert_binary_plink_to_text.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype_maf_filtered \
+            --extract analysis/genotype/genotype_maf_filtered.prune.in \
+            --make-bed \
+            --out analysis/genotype/genotype_maf_filtered_pruned \
+            > {log} \
+            2>&1
+        """
+
+
+# Subpart: PCA
+################
+
+rule convert_binary_plink_to_additive_raw:
+    input:
+        'analysis/genotype/genotype_maf_filtered_pruned.bed',
+        'analysis/genotype/genotype_maf_filtered_pruned.bim',
+        'analysis/genotype/genotype_maf_filtered_pruned.fam',
+    output:
+        'analysis/population_structure/genotype_maf_filtered_pruned.raw',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/convert_binary_plink_to_ped.txt'
+    log:
+        'logs/convert_binary_plink_to_ped.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype_maf_filtered_pruned \
+            --out analysis/population_structure/genotype_maf_filtered_pruned \
+            --recodeA \
+            > {log} \
+            2>&1
+        """
+
+
+rule redundancy_filter_plink_additive_raw:
+    input:
+        'analysis/population_structure/genotype_maf_filtered_pruned.raw',
+    output:
+        'analysis/population_structure/genotype_maf_filtered_pruned_non_redundant.raw',
+        'analysis/population_structure/genotype_maf_filtered_pruned_redundant_genotype.csv',
+        'analysis/population_structure/genotype_maf_filtered_pruned_redundant_marker.csv',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/redundancy_filter_plink_additive_raw.txt'
+    log:
+        'logs/redundancy_filter_plink_additive_raw.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 \
+            {wfbasedir}/src/marker_data_redundancy_filter.py \
+            --input {input} \
+            --output analysis/population_structure/genotype_maf_filtered_pruned \
+            > {log} \
+            2>&1
+        """
+
+
+rule extract_genotype_data:
+    input:
+        'analysis/population_structure/genotype_maf_filtered_pruned_non_redundant.raw',
+    output:
+        'analysis/population_structure/genotype_maf_filtered_pruned_non_redundant.tsv',
+    benchmark:
+        'benchmark/extract_genotype_data.txt'
+    log:
+        'logs/extract_genotype_data.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        cut \
+            --complement \
+            -d' ' \
+            -f2,3,4,5,6 \
+            {input} \
+            > {output} \
+            2> {log}
+        """
+
+
+rule perform_dimensionality_reduction_analysis:
+    input:
+        'analysis/population_structure/genotype_maf_filtered_pruned_non_redundant.tsv',
+    output:
+        'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_genotype_measure.csv',
+        'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_coordinates.csv',
+        'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_eigenvalues.csv',
+        'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_eigenvectors.csv',
+        'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_explained_variance.csv',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/perform_dimensionality_reduction_analysis_{analysis_type}.txt'
+    log:
+        'logs/perform_dimensionality_reduction_analysis_{analysis_type}.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python {wfbasedir}/src/genotype_combination_dimensionality_reduction_analysis.py \
+            --analysis {wildcards.analysis_type} \
+            --genotype {input} \
+            --title genotype_maf_filtered_pruned_non_redundant_{wildcards.analysis_type} \
+            --output analysis/population_structure/{wildcards.analysis_type} \
+            2> {log}
+        """
+
+
+rule generate_dimensionality_reduction_plots:
+    input:
+        coordinates = 'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_coordinates.csv',
+        eigenvalue = 'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_eigenvalues.csv',
+    output:
+        expand('analysis/plots/{{analysis_type}}/genotype_maf_filtered_pruned_non_redundant_{{analysis_type}}_{file}.{file_type}', file = ['2d_plot', '2d_plot_with_label', '3d_plot', 'matrix_plot', 'cumulative_explained_variance', 'scree_plot'], file_type = ['png', 'svg']),
+        'analysis/plots/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_3d_animation.mp4',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/generate_dimensionality_reduction_plots_{analysis_type}_plots.txt'
+    log:
+        'logs/generate_dimensionality_reduction_plots_{analysis_type}_plots.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python {wfbasedir}/src/dimensionality_reduction_plot_generation.py \
+            --coord {input.coordinates} \
+            --eigenval {input.eigenvalue} \
+            --output analysis/plots/{wildcards.analysis_type}/genotype_maf_filtered_pruned_non_redundant_{wildcards.analysis_type} \
+            2> {log}
+        """
+
+
+rule extract_structure_sample_names:
+    input:
+        'analysis/population_structure/structure/genotype_maf_filtered_pruned.recode.strct_in'
+    output:
+        'analysis/population_structure/structure/genotype_maf_filtered_pruned.recode.txt'
+    benchmark:
+        'benchmark/extract_structure_sample_names.log'
+    log:
+        'logs/extract_structure_sample_names.log'
+    resources:
+        mem = 1, # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        cut \
+            -d' ' \
+            -f 1 \
+            {input} \
+            | tail -n +3 \
+                > {output} \
+                2> {log}
+        """
+
+rule generate_dimensionality_reduction_plots_cluster_color:
+    input:
+        coordinates = 'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_coordinates.csv',
+        samples = 'analysis/population_structure/structure/genotype_maf_filtered_pruned.recode.txt',
+        cluster = 'analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}_pophelper_best_cluster',
+        explained_variance = 'analysis/population_structure/{analysis_type}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_explained_variance.csv',
+    output:
+        expand('analysis/plots/{{analysis_type}}/k{{cluster_size}}/genotype_maf_filtered_pruned_non_redundant_{{analysis_type}}_k{{cluster_size}}_{file}.{file_type}', file = ['2d_plot', '2d_plot_with_label', '3d_plot', 'matrix_plot', 'cumulative_explained_variance'], file_type = ['png', 'svg']),
+        'analysis/plots/{analysis_type}/k{cluster_size}/genotype_maf_filtered_pruned_non_redundant_{analysis_type}_k{cluster_size}_3d_animation.mp4',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/generate_dimensionality_reduction_plots_cluster_color_{analysis_type}_k{cluster_size}_plots.txt'
+    log:
+        'logs/generate_dimensionality_reduction_plots_cluster_color_{analysis_type}_k{cluster_size}_plots.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python {wfbasedir}/src/dimensionality_reduction_plot_generation.py \
+            --coord {input.coordinates} \
+            --cluster {input.cluster} \
+            --eigenval {input.explained_variance} \
+            --output analysis/plots/{wildcards.analysis_type}/k{wildcards.cluster_size}/genotype_maf_filtered_pruned_non_redundant_{wildcards.analysis_type}_k{wildcards.cluster_size} \
+            --samples {input.samples} \
+            2> {log}
+        """
+
+
+rule plink_perform_pca:
+    input:
+        'analysis/genotype/genotype_maf_filtered_pruned.bed',
+        'analysis/genotype/genotype_maf_filtered_pruned.bim',
+        'analysis/genotype/genotype_maf_filtered_pruned.fam',
+    output:
+        'analysis/population_structure/pca/genotype_maf_filtered_pruned.eigenvec',
+        'analysis/population_structure/pca/genotype_maf_filtered_pruned.eigenval',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/plink_perform_pca.txt'
+    log:
+        'logs/plink_perform_pca.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype_maf_filtered_pruned \
+            --out analysis/population_structure/pca/genotype_maf_filtered_pruned \
+            --pca \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_perform_mds:
+    input:
+        'analysis/genotype/genotype_maf_filtered_pruned.bed',
+        'analysis/genotype/genotype_maf_filtered_pruned.bim',
+        'analysis/genotype/genotype_maf_filtered_pruned.fam',
+    output:
+        'analysis/population_structure/mds/genotype_maf_filtered_pruned.mds',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/plink_perform_mds.txt'
+    log:
+        'logs/plink_perform_mds.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype_maf_filtered_pruned \
+            --cluster \
+            --mds-plot 20 eigendecomp \
+            --out analysis/population_structure/mds/genotype_maf_filtered_pruned \
+            > {log} \
+            2>&1
+        """
+
+
+rule reformat_mds_as_plink_covar:
+    input:
+        'analysis/population_structure/mds/genotype_maf_filtered_pruned.mds',
+    output:
+        'analysis/population_structure/mds/genotype_maf_filtered_pruned.eigenvec',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/reformat_mds_as_plink_covar.txt'
+    log:
+        'logs/reformat_mds_as_plink_covar.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        tail \
+            -n+2 \
+            {input} \
+            | awk 'BEGIN {{OFS="\t"}}; {{$3="";print $0}}' \
+            > {output} \
+            2> {log}
+        """
+
+
+# Subpart: Structure
+######################        
+
+rule convert_binary_plink_to_structure_format:
+    input:
+        'analysis/genotype/genotype_maf_filtered_pruned.bed',
+        'analysis/genotype/genotype_maf_filtered_pruned.bim',
+        'analysis/genotype/genotype_maf_filtered_pruned.fam',
+    output:
+        'analysis/population_structure/structure/genotype_maf_filtered_pruned.recode.strct_in',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/convert_binary_plink_to_structure_format.txt'
+    log:
+        'logs/convert_binary_plink_to_structure_format.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype_maf_filtered_pruned \
+            --out analysis/population_structure/structure/genotype_maf_filtered_pruned \
+            --recode structure \
+            > {log} \
+            2>&1
+        """
+
+
+rule export_sample_labels:    
+    input:
+        'analysis/genotype/genotype_maf_filtered_pruned.fam',
+    output:
+        'analysis/genotype/genotype_maf_filtered_pruned_label.csv',
+    benchmark:
+        'benchmark/export_sample_labels.txt'
+    log:
+        'logs/export_sample_labels.txt'
+    resources:
+        mem = 1,
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        awk \
+            '{{print $2}}' \
+            {input} \
+            > {output} \
+            2> {log}
+        """
+
+
+'''
+rule structure_cluster_analysis:
+    input:
+        'analysis/population_structure/structure/genotype_maf_filtered_pruned.recode.strct_in',
+    output:
+         result = directory('analysis/population_structure/structure/clustering'),
+         structure_extraparams = 'analysis/population_structure/structure/extraparams',
+         structure_mainparams = 'analysis/population_structure/structure/mainparams',
+    benchmark:
+        'benchmark/structure_cluster_analysis.txt'
+    log:
+        'logs/structure_cluster_analysis.log'
+    conda:
+        'envs/structure.yaml'
+    params:
+        structure_k_list = ' '.join(str(cluster_size) for cluster_size in STRUCTURE_K)
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 16
+    shell:
+        """
+        echo "#define INFILE {input}" > {output.structure_mainparams}
+        echo "#define OUTFILE {output.result}" >> {output.structure_mainparams}
+        NUMBER_INDIVIDUALS=$(tail -n+3 {input} | wc -l | awk '{{print $1}}')
+        NUMBER_LOCI=$(awk 'NR==3 {{print; exit}}' {input} | wc | awk '{{print ($2-2)/2}}')
+        echo "#define NUMINDS $NUMBER_INDIVIDUALS" >> {output.structure_mainparams}
+        echo "#define NUMLOCI $NUMBER_LOCI" >> {output.structure_mainparams}
+        echo "#define LABEL 0" >> {output.structure_mainparams}
+        echo "#define POPDATA 0" >> {output.structure_mainparams}
+        echo "#define POPFLAG 0" >> {output.structure_mainparams}
+        echo "#define PHENOTYPE 0" >> {output.structure_mainparams}
+        echo "#define EXTRACOLS 2" >> {output.structure_mainparams}
+        echo "#define PHASEINFO 0" >> {output.structure_mainparams}
+        echo "#define MISSING 0" >> {output.structure_mainparams}
+        echo "#define PLOIDY 2" >> {output.structure_mainparams}
+        echo "#define ONEROWPERIND 1" >> {output.structure_mainparams}
+        echo "#define MARKERNAMES 1" >> {output.structure_mainparams}
+        echo "#define MAPDISTANCES 1" >> {output.structure_mainparams}
+        echo "#define MAXPOPS 10" >> {output.structure_mainparams}
+        echo "#define BURNIN 10000" >> {output.structure_mainparams}
+        echo "#define NUMREPS 20000" >> {output.structure_mainparams}
+
+        echo "#define RANDOMIZE 0" > {output.structure_extraparams}
+
+        STRUCTURE=$(which structure)
+        structure_threader run \
+            -i {input} \
+            -Klist {params.structure_k_list} \
+            -o {output.result} \
+            --params {output.structure_mainparams} \
+            -st $STRUCTURE \
+            -t {threads} \
+            > {log} \
+            2>&1
+        """
+'''
+
+
+rule structure_replicate_clumpp_aggregation:
+    input:
+        'analysis/population_structure/structure/clustering',
+    output:
+        indfile = 'analysis/population_structure/structure/clumpp/indfile_k{cluster_size}',
+        popfile = 'analysis/population_structure/structure/clumpp/popfile_k{cluster_size}',
+    benchmark:
+        'benchmark/structure_replicate_clumpp_aggregation_k{cluster_size}.txt'
+    log:
+        'logs/structure_replicate_clumpp_aggregation_k{cluster_size}.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 \
+            {wfbasedir}/src/clumpp_merge_structure_runs.py \
+            --output_ind {output.indfile} \
+            --output_pop {output.popfile} \
+            --prefix str_K{wildcards.cluster_size}_rep \
+            --structure {input} \
+            > {log} \
+            2>&1
+        """
+
+
+rule structure_clumpp_analysis:
+    input:
+        indfile = 'analysis/population_structure/structure/clumpp/indfile_k{cluster_size}',
+        popfile = 'analysis/population_structure/structure/clumpp/popfile_k{cluster_size}',
+    output:
+        miscfile = 'analysis/population_structure/structure/clumpp/{dimension}/k{cluster_size}/miscfile_{dimension}_k{cluster_size}',
+        paramfile = 'analysis/population_structure/structure/clumpp/{dimension}/k{cluster_size}/paramfile_{dimension}_k{cluster_size}',
+        random_order = 'analysis/population_structure/structure/clumpp/{dimension}/k{cluster_size}/random_input_order_{dimension}_k{cluster_size}',
+        result = 'analysis/population_structure/structure/clumpp/{dimension}/k{cluster_size}/clumpp_result_{dimension}_k{cluster_size}',
+    benchmark:
+        'benchmark/structure_clumpp_analysis_{dimension}_k{cluster_size}.txt'
+    log:
+        'logs/structure_clumpp_analysis_{dimension}_k{cluster_size}.log'
+    conda:
+        'envs/clumpp.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        NUMBER_RUNS=$(ls -al analysis/population_structure/structure/clustering/str_K{wildcards.cluster_size}_* | wc -l | awk '{{print $1}}')
+        NUMBER_TOTAL=$(wc -l analysis/population_structure/structure/clumpp/indfile_k{wildcards.cluster_size} | awk '{{print $1}}')
+        NUMBER_INDIVIDUALS=$(expr \( $NUMBER_TOTAL - $NUMBER_RUNS \) / $NUMBER_RUNS)
+        
+        if [ "{wildcards.dimension}" = "ind" ]
+        then
+            echo "DATATYPE 0" > {output.paramfile}
+            echo "INDFILE {input.indfile}" >> {output.paramfile}
+        else
+            echo "DATATYPE 1" > {output.paramfile}
+            echo "POPFILE {input.popfile}" >> {output.paramfile}
+        fi
+        
+        echo "MISCFILE {output.miscfile}" >> {output.paramfile}
+        echo "OUTFILE {output.result}" >> {output.paramfile}
+        echo "K {wildcards.cluster_size}" >> {output.paramfile}
+        
+        if [ "{wildcards.dimension}" = "ind" ]
+        then
+            echo "C $NUMBER_INDIVIDUALS" >> {output.paramfile}
+        else
+            echo "C 1" >> {output.paramfile}
+        fi
+        
+        echo "R $NUMBER_RUNS" >> {output.paramfile}
+        echo "M 2" >> {output.paramfile}
+        echo "W 1" >> {output.paramfile}
+        echo "S 2" >> {output.paramfile}
+        echo "GREEDY_OPTION 2" >> {output.paramfile}
+        echo "GREEDY_ORDER 2" >> {output.paramfile}
+        echo "REPEATS 100" >> {output.paramfile}
+        echo "OVERRIDE_WARNINGS 0" >> {output.paramfile}
+        echo "ORDER_BY_RUN 0" >> {output.paramfile}
+        echo "PRINT_EVERY_PERM 0" >> {output.paramfile}
+        echo "PRINT_PERMUTED_DATA 0" >> {output.paramfile}
+
+        if [ "{wildcards.dimension}" = "ind" ]
+        then
+            echo "PRINT_RANDOM_INPUTORDER 0" >> {output.paramfile}
+            echo "RANDOM_INPUTORDERFILE " >> {output.paramfile}
+        else
+            echo "PRINT_RANDOM_INPUTORDER 0" >> {output.paramfile}
+            echo "RANDOM_INPUTORDERFILE " >> {output.paramfile}
+        fi
+        #echo "PRINT_RANDOM_INPUTORDER 1" >> {output.paramfile}
+        #echo "RANDOM_INPUTORDERFILE {output.random_order}" >> {output.paramfile}
+        touch {output.random_order}
+
+        CLUMPP \
+            {output.paramfile} \
+            > {log} \
+            2>&1
+        """
+
+
+rule structure_clumpp_pophelper_reformat:
+    input:
+        'analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}',
+    output:
+        'analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}_pophelper',
+    benchmark:
+        'benchmark/structure_clumpp_pophelper_reformat_k{cluster_size}.txt'
+    log:
+        'logs/structure_clumpp_pophelper_reformat_k{cluster_size}.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 \
+            {wfbasedir}/src/clumpp_result_pophelper_reformat.py \
+            --input {input} \
+            --output {output} \
+            > {log} \
+            2>&1
+        """
+
+
+rule clumpp_pophelper_max_cluster_export:
+    input:
+        cluster = 'analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}_pophelper',
+        label = 'analysis/genotype/genotype_maf_filtered_pruned_label.csv',
+    output:
+        'analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}_pophelper_best_cluster',
+    benchmark:
+        'benchmark/clumpp_pophelper_max_cluster_export_k{cluster_size}.txt'
+    log:
+        'logs/clumpp_pophelper_max_cluster_export_k{cluster_size}.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python3 \
+            {wfbasedir}/src/clumpp_pophelper_cluster_export.py \
+            --cluster {input.cluster} \
+            --label {input.label} \
+            --output {output} \
+            > {log} \
+            2>&1
+        """
+
+
+rule pophelper_plot_generation:
+    input:
+        expand('analysis/population_structure/structure/clumpp/ind/k{cluster_size}/clumpp_result_ind_k{cluster_size}_pophelper', cluster_size = STRUCTURE_K),
+    output:
+        directory('analysis/plots/population_structure'),
+    benchmark:
+        'benchmark/pophelper_plot_generation.txt'
+    log:
+        'logs/pophelper_plot_generation.log'
+    conda:
+        'envs/pophelper.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        INPUT_FILENAMES_SPACED=$(echo "{input}")
+        INPUT_FILENAMES=${{INPUT_FILENAMES_SPACED// /,}}
+        
+        mkdir -p {output}
+
+        Rscript \
+            {wfbasedir}/src/generate_pophelper_plots.R \
+            --input $INPUT_FILENAMES \
+            --outdir {output} \
+            > {log} \
+            2>&1
+        """
+
+
+# Subpart: GWAS analysis
+#############################
+
+rule plink_gwas_linear_analysis:
+    input:
+        bed_input = 'analysis/genotype/genotype_maf_filtered_pruned.bed',
+        bim_input = 'analysis/genotype/genotype_maf_filtered_pruned.bim',
+        fam_input = 'analysis/genotype/genotype_maf_filtered_pruned.fam',
+        phenotype = 'analysis/phenotype/adjusted/{trait}.{adjusted_dataset}.pheno',
+        structure = 'analysis/population_structure/{covar_type}/genotype_maf_filtered_pruned.eigenvec',
+    output:
+        'analysis/gwas/{adjusted_dataset}/{trait}/gwas.{covar_type}_{covar}.log',
+    benchmark:
+        'benchmark/plink_gwas_linear_analysis_{trait}_{covar_type}{covar}_{adjusted_dataset}.txt'
+    log:
+        'logs/plink_gwas_linear_analysis_{trait}_{covar_type}{covar}_{adjusted_dataset}.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 32
+    shell:
+        """
+        plink \
+            --adjust qq-plot \
+            --all-pheno \
+            --allow-extra-chr \
+            --allow-no-sex \
+            --bfile analysis/genotype/genotype_maf_filtered_pruned \
+            --covar {input.structure} \
+            --covar-number 1-{wildcards.covar} \
+            --linear \
+            --out analysis/gwas/{wildcards.adjusted_dataset}/{wildcards.trait}/gwas.{wildcards.covar_type}_{wildcards.covar} \
+            --pheno {input.phenotype} \
+	        --tdt \
+            --threads {threads} \
+            > {log} \
+            2>&1
+        """
+
+rule gwas_ref_output:
+    input:
+        gwas = 'analysis/gwas/{adjusted_dataset}/{trait}/gwas.{covar_type}_{covar}.log',
+        marker = 'analysis/data/genotype/genotype_filtered.tsv',
+    output:
+        'analysis/gwas/{adjusted_dataset}/{trait}/{trait}_{covar_type}_{covar}.xlsx',
+    benchmark:
+        'benchmark/gwas_ref_output_{trait}_{covar_type}{covar}_{adjusted_dataset}.txt'
+    log:
+        'logs/gwas_ref_output_{trait}_{covar_type}{covar}_{adjusted_dataset}.log'
+    conda:
+        'envs/r_xlsx.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        Rscript {wfbasedir}/src/gwas_summary.R \
+            --gwas analysis/gwas/{wildcards.adjusted_dataset}/{wildcards.trait}/gwas.{wildcards.covar_type}_{wildcards.covar}.{wildcards.trait}.assoc.linear.adjusted \
+            --marker {input.marker} \
+            --output {output} \
+            > {log} \
+            2>&1
+        """
+
+
+rule gwas_summary_listing_output:
+    input:
+        expand(
+            'analysis/gwas/{{adjusted_dataset}}/{trait}/{trait}_{covar_type}_{covar}.xlsx',
+            trait=[
+                'erucic_acid_fraction', 'flowering_time', 'glucoallyssin_concentration',
+                'glucosinolate_concentration', 'oil_content', 'oleic_acid_fraction', 
+                'seed_weight', 'sinalbin_concentration'
+            ],
+            covar_type=['mds', 'pca'],
+            covar=range(2, 15),
+        )
+    output:
+        'analysis/gwas/{adjusted_dataset}/summary.csv',
+    benchmark:
+        'benchmark/gwas_summary_output_{adjusted_dataset}.txt'
+    log:
+        'logs/gwas_summary_output_{adjusted_dataset}.log'
+    conda:
+        'envs/python3.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python \
+            {wfbasedir}/src/gwas_stats.py \
+            {input} \
+            > {output}
+        """
+
+
+# Subpart: GWAS plots
+#######################
+
+rule gwas_covar_plots:
+    input:
+        gwas = 'analysis/gwas/{adjusted_dataset}/{trait}/gwas.{covar_type}_{covar}.log',
+        marker = 'analysis/data/genotype/genotype_filtered.tsv',
+    output:
+        'analysis/plots/gwas/{adjusted_dataset}/{trait}_{covar_type}_{covar}_manhattan.png',
+        'analysis/plots/gwas/{adjusted_dataset}/{trait}_{covar_type}_{covar}_qq.png',
+    benchmark:
+        'benchmark/gwas_plots_{trait}_{covar_type}{covar}_{adjusted_dataset}.txt'
+    log:
+        'logs/gwas_plots_{trait}_{covar_type}{covar}_{adjusted_dataset}.log'
+    conda:
+        'envs/r_qqman.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 32
+    shell:
+        """
+        Rscript {wfbasedir}/src/gwas_plots.R \
+            --gwas analysis/gwas/{wildcards.adjusted_dataset}/{wildcards.trait}/gwas.{wildcards.covar_type}_{wildcards.covar}.{wildcards.trait}.assoc.linear.adjusted \
+            --marker {input.marker} \
+            --output analysis/plots/gwas/{wildcards.adjusted_dataset}/{wildcards.trait}_{wildcards.covar_type}_{wildcards.covar} \
+            > {log} \
+            2>&1
+        """
+
+
+# Subpart: dataset summaries
+#############################
+
+rule plink_missingness_summary:
+    input:
+        'analysis/genotype/genotype.bed',
+        'analysis/genotype/genotype.bim',
+        'analysis/genotype/genotype.fam',
+    output:
+        temp('analysis/genotype/missing_summary/genotype_intermediate.imiss'),
+        temp('analysis/genotype/missing_summary/genotype_intermediate.lmiss'),
+        temp('analysis/genotype/missing_summary/genotype_intermediate.log'),
+        temp('analysis/genotype/missing_summary/genotype_intermediate.nosex'),
+    benchmark:
+        'benchmark/plink_missingness_summary.txt'
+    log:
+        'logs/plink_missingness_summary.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --bfile analysis/genotype/genotype \
+            --allow-extra-chr \
+            --missing \
+            --out analysis/genotype/missing_summary/genotype_intermediate \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_missingness_summary_reformat:
+    input:
+        'analysis/genotype/missing_summary/genotype_intermediate.{dataset}',
+    output:
+        'analysis/genotype/missing_summary/genotype.{dataset}',
+    benchmark:
+        'benchmark/plink_missingness_summary_reformat_{dataset}.txt'
+    log:
+        'logs/plink_missingness_summary_reformat_{dataset}.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        awk \
+            '{{$1=$1}};1' \
+            {input} \
+            > {output} \
+            2> {log}
+        """
+
+
+rule plink_marker_allele_frequency_summary:
+    input:
+        'analysis/genotype/genotype.bed',
+        'analysis/genotype/genotype.bim',
+        'analysis/genotype/genotype.fam',
+    output:
+        temp('analysis/genotype/marker_allele_frequency_summary/genotype_intermediate.frq'),
+    benchmark:
+        'benchmark/plink_marker_allele_frequency_summary.txt'
+    log:
+        'logs/plink_marker_allele_frequency_summary.log'
+    conda:
+        'envs/plink.yaml'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --bfile analysis/genotype/genotype \
+            --allow-extra-chr \
+            --freq \
+            --out analysis/genotype/marker_allele_frequency_summary/genotype_intermediate \
+            > {log} \
+            2>&1
+        """
+
+
+rule plink_marker_allele_frequency_summary_reformat:
+    input:
+        'analysis/genotype/marker_allele_frequency_summary/genotype_intermediate.frq',
+    output:
+        'analysis/genotype/marker_allele_frequency_summary/genotype.frq',
+    benchmark:
+        'benchmark/plink_marker_allele_frequency_summary_reformat.txt'
+    log:
+        'logs/plink_marker_allele_frequency_summary_reformat.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        awk \
+            '{{$1=$1}};1' \
+            {input} \
+            > {output} \
+            2> {log}
+        """
+
+
+# Subpart: plot generation
+############################
+
+rule convert_unfiltered_binary_plink_to_additive_raw:
+    input:
+        'analysis/data/genotype/plink/binary/genotype.bed',
+        'analysis/data/genotype/plink/binary/genotype.bim',
+        'analysis/data/genotype/plink/binary/genotype.fam',
+    output:
+        'analysis/data/genotype/plink/genotype.raw',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/convert_unfiltered_binary_plink_to_additive_raw.txt'
+    log:
+        'logs/convert_unfiltered_binary_plink_to_additive_raw.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/data/genotype/plink/binary/genotype \
+            --out analysis/data/genotype/plink/genotype \
+            --recodeA \
+            > {log} \
+            2>&1
+        """
+
+
+rule convert_filtered_binary_plink_to_additive_raw:
+    input:
+        'analysis/genotype/genotype_maf_filtered.bed',
+        'analysis/genotype/genotype_maf_filtered.bim',
+        'analysis/genotype/genotype_maf_filtered.fam',
+    output:
+        'analysis/genotype/genotype_maf_filtered.raw',
+    conda:
+        'envs/plink.yaml'
+    benchmark:
+        'benchmark/convert_filtered_binary_plink_to_additive_raw.txt'
+    log:
+        'logs/convert_filtered_binary_plink_to_additive_raw.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        plink \
+            --allow-extra-chr \
+            --bfile analysis/genotype/genotype_maf_filtered \
+            --out analysis/genotype/genotype_maf_filtered \
+            --recodeA \
+            > {log} \
+            2>&1
+        """
+
+
+rule generate_unfiltered_plink_additive_cluster_heatmap_plot:
+    input:
+        'analysis/data/genotype/plink/genotype.raw',
+    output:
+        'analysis/plots/heatmaps/genotype_alleles_unfiltered.png',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/generate_pruned_plink_additive_cluster_heatmap_plot.txt'
+    log:
+        'logs/generate_pruned_plink_additive_cluster_heatmap_plot.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python \
+            {wfbasedir}/src/plink_recodea_clustered_heatmap_plot_generation.py \
+            --genotype {input} \
+            --output analysis/plots/heatmaps/genotype_alleles_unfiltered \
+            > {log} \
+            2>&1
+        """
+
+
+rule generate_filtered_plink_additive_cluster_heatmap_plot:
+    input:
+        'analysis/genotype/genotype_maf_filtered.raw',
+    output:
+        'analysis/plots/heatmaps/genotype_alleles_filtered.png',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/generate_pruned_plink_additive_cluster_heatmap_plot.txt'
+    log:
+        'logs/generate_pruned_plink_additive_cluster_heatmap_plot.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python \
+            {wfbasedir}/src/plink_recodea_clustered_heatmap_plot_generation.py \
+            --genotype {input} \
+            --output analysis/plots/heatmaps/genotype_alleles_filtered \
+            > {log} \
+            2>&1
+        """
+
+
+rule generate_pruned_plink_additive_cluster_heatmap_plot:
+    input:
+        'analysis/population_structure/genotype_maf_filtered_pruned_non_redundant.raw',
+    output:
+        'analysis/plots/heatmaps/genotype_alleles_pruned.png',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/generate_pruned_plink_additive_cluster_heatmap_plot.txt'
+    log:
+        'logs/generate_pruned_plink_additive_cluster_heatmap_plot.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python \
+            {wfbasedir}/src/plink_recodea_clustered_heatmap_plot_generation.py \
+            --genotype {input} \
+            --output analysis/plots/heatmaps/genotype_alleles_pruned \
+            > {log} \
+            2>&1
+        """
+
+
+rule generate_pruned_non_redundant_plink_additive_cluster_heatmap_plot:
+    input:
+        'analysis/population_structure/genotype_maf_filtered_pruned_non_redundant.raw',
+    output:
+        'analysis/plots/heatmaps/genotype_alleles_pruned_non_redundant.png',
+    conda:
+        'envs/python3.yaml'
+    benchmark:
+        'benchmark/generate_pruned_non_redundant_plink_additive_cluster_heatmap_plot.txt'
+    log:
+        'logs/generate_pruned_non_redundant_plink_additive_cluster_heatmap_plot.log'
+    resources:
+        mem = 1,  # in GB
+        days = 0,
+        hours = 1,
+    threads: 1
+    shell:
+        """
+        python \
+            {wfbasedir}/src/plink_recodea_clustered_heatmap_plot_generation.py \
+            --genotype {input} \
+            --output analysis/plots/heatmaps/genotype_alleles_pruned_non_redundant \
+            > {log} \
+            2>&1
+        """
+

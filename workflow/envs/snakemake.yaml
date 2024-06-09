@@ -1,0 +1,9 @@
+channels:
+  - default
+  - conda-forge
+  - bioconda
+  - biobuilds
+dependencies:
+  - snakemake = 5.8.1
+  - conda = 23.3.1
+  - natsort = 8.3.1

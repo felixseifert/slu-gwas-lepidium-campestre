@@ -1,0 +1,12 @@
+name: r_qqman
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - r-argparse = 2.2.2
+  - r-base = 4.3.3
+  - r-dplyr = 1.1.4
+  - r-janitor = 2.2.0
+  - r-qqman = 0.1.9
+  - r-stringr = 1.5.1

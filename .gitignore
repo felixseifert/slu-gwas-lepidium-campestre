@@ -1,0 +1,6 @@
+.snakemake
+analysis/
+benchmark/
+data/
+logs/
+report/

@@ -1,0 +1,12 @@
+name: r_xlsx
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - r-argparse = 2.2.3
+  - r-base = 4.3.3
+  - r-dplyr = 1.1.4
+  - r-purrr = 1.0.2
+  - r-stringr = 1.5.1
+  - r-writexl = 1.5.0
